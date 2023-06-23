@@ -1,0 +1,55 @@
+k8s-infra:
+  presets:
+    logsCollection:
+      blacklist:
+        namespaces:
+          - default
+          - kube-node-lease
+          - kube-public
+          - kube-system
+          - local-path-storage
+          - platform
+          # we only want this
+          #- the-app
+
+otelCollector:
+  config:
+    processors:
+      logstransform/internal:
+        operators:
+          # match for a body in json type
+          - default: noop
+            id: router_signoz
+            routes:
+              - expr: 'body matches "^{.*}$"'
+                output: parse_json
+            type: router
+          # parse body as json to tmp
+          - id: parse_json
+            type: json_parser
+            parse_from: body
+            parse_to: attributes.temp
+            output: trace_parse
+          # parse trace id
+          - type: trace_parser
+            id: trace_parse
+            trace_id:
+              parse_from: attributes.temp.traceId
+            span_id:
+              parse_from: attributes.temp.spanId
+            output: move_level
+          # check if level attribute exist and move it to the attributes
+          - type: move
+            id: move_level
+            from: attributes.temp.level
+            to: attributes.level
+            if: "'level' in attributes.temp"
+            output: remove
+          # remove temp
+          - id: remove
+            type: remove
+            field: attributes.temp
+            output: noop
+          # done
+          - id: noop
+            type: noop

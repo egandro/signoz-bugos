@@ -1,3 +1,9 @@
+DIR_HASH=$(shell git rev-parse --short HEAD)
+CI_REGISTRY=localhost:5001
+CI_PROJECT_NAME=service
+CI_REGISTRY_IMAGE=$(CI_REGISTRY)/$(CI_PROJECT_NAME)
+TAG=$(DIR_HASH)
+
 export KUBECONFIG=.kubeconfig
 export KIND_CLUSTER_NAME=signoz-test
 
@@ -22,10 +28,11 @@ helm-prepare:
 	helm repo add signoz https://charts.signoz.io
 	helm repo update
 
-install-signoz:
+install-signoz: helm-prepare
 	kubectl create ns platform
-	helm --namespace platform install my-release signoz/signoz
+	helm --namespace platform install my-release signoz/signoz -f ./values.yaml
 	sleep 30
+	@echo waiting until frontend pod is ready... this is sometimes super unstable and needs to be fixed!
 	kubectl -n platform wait --for=condition=ready \
       pod -l "app.kubernetes.io/component=frontend" --timeout=30m
 
@@ -40,4 +47,29 @@ connect-web:
 	kubectl --namespace platform port-forward `kubectl get pods --namespace platform -l "app.kubernetes.io/name=signoz,app.kubernetes.io/instance=my-release,app.kubernetes.io/component=frontend" -o jsonpath="{.items[0].metadata.name}"` 3301:3301
 
 
+#
+# dummy go application
+#
+run: build
+	deploy/service
 
+build:
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o deploy/service ./cmd
+
+package:
+	cd deploy && \
+	DOCKER_BUILDKIT=1 docker build  \
+		--tag $(CI_REGISTRY_IMAGE):$(TAG) \
+		--tag $(CI_REGISTRY_IMAGE):latest .
+	@echo created $(CI_REGISTRY_IMAGE):$(TAG)
+
+push:
+	docker push $(CI_REGISTRY_IMAGE):$(TAG)
+
+deployment: build package push
+	@kubectl create namespace the-app 2>/dev/null || true
+	@kubectl -n the-app delete deploy server 2>/dev/null || true
+	kubectl -n the-app create deployment server --image=$(CI_REGISTRY_IMAGE):$(TAG)
+
+showlogs:
+	kubectl  -n the-app logs -f pods/$$(kubectl -n the-app get pod -l "app=server" -o jsonpath="{.items[0].metadata.name}")
